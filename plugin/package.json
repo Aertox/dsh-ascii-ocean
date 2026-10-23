@@ -1,0 +1,36 @@
+{
+  "name": "dsh-ascii-ocean-bg",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ASCII ocean as a live DSH background — sharks, schools and wake rendered as a fixed canvas behind the Web GUI.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

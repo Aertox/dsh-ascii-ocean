@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ascii ocean bg — harness</title>
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@600&display=swap" rel="stylesheet" />
+    <style>
+      :root { color-scheme: dark; }
+      html, body { margin: 0; height: 100%; background: #151517; font: 14px/22px -apple-system, BlinkMacSystemFont, sans-serif; }
+      /* Minimal stand-ins for the tokens the real theme publishes on body. */
+      body[data-ds-dark-theme] {
+        --dsw-static-neutral-bluish-870: #202022;
+        --dsw-static-neutral-bluish-900: #1b1b1c;
+        --dsw-static-neutral-bluish-950: #151517;
+        --dsw-alias-bg-base: #151517;
+        --dsw-specific-sidebar-fill: #1b1b1c;
+        --dsw-alias-border-l3: #353638;
+        --dsw-alias-label-primary: #f5f5f6;
+        --dsw-alias-label-secondary: #a2a2a6;
+      }
+      /* The AppFrame grid, as the layout package renders it. */
+      #frame {
+        display: grid;
+        grid-template-columns: 280px minmax(400px, 1fr) 0px;
+        grid-template-rows: minmax(0, 1fr) auto;
+        height: 100%;
+        background: var(--dsw-alias-bg-base);
+        position: relative;
+        overflow: hidden;
+      }
+      #sidebar { background: var(--dsw-specific-sidebar-fill); border-right: .5px solid var(--dsw-alias-border-l3); padding: 56px 16px 16px; }
+      #center { display: flex; flex-direction: column; overflow: hidden; }
+      .overlay { position: absolute; inset: 0; z-index: 20; pointer-events: none; }
+      .bottom { grid-column: 1 / -1; }
+      .brand { font-weight: 600; letter-spacing: .02em; margin-bottom: 18px; }
+      .row { color: var(--dsw-alias-label-secondary); padding: 4px 8px; border-radius: 6px; }
+      .row.on { background: #202022; color: var(--dsw-alias-label-primary); }
+      .msgs { padding: 56px 28px 0; display: flex; flex-direction: column; gap: 18px; }
+      .user { align-self: flex-end; background: #202022; color: var(--dsw-alias-label-primary); padding: 8px 12px; border-radius: 10px; max-width: 60%; }
+      .bot { color: var(--dsw-alias-label-primary); max-width: 70%; }
+      .bot em { color: var(--dsw-alias-label-secondary); font-style: normal; }
+      .composer { margin: auto 28px 20px; border: .5px solid var(--dsw-alias-border-l3); border-radius: 12px; padding: 12px 14px; color: var(--dsw-alias-label-secondary); background: #202022; }
+    </style>
+  </head>
+  <body data-ds-dark-theme>
+    <div id="frame">
+      <div id="sidebar">
+        <div class="brand">DeepSeek Harness</div>
+        <div class="row on">New session</div>
+        <div class="row">ascii shaders</div>
+        <div class="row">plugin packaging</div>
+      </div>
+      <div id="center">
+        <div class="msgs">
+          <div class="user">把动态场景做成 dsh 的背景</div>
+          <div class="bot">Ocean mounted behind the frame. <em>The sidebar and transcript are translucent now, so the water shows through.</em></div>
+        </div>
+        <div class="composer">Message DeepSeek Harness…</div>
+      </div>
+      <div class="bottom"></div>
+      <div class="overlay" data-shell-overlay></div>
+    </div>
+
+    <script>
+      // Optional roster override for previewing: ?whales=humpback,bluewhale
+      const whales = new URLSearchParams(location.search).get("whales");
+      if (whales) {
+        window.__DSH_ASCII_OCEAN_CONFIG__ = { whales: whales.split(",").filter(Boolean) };
+      }
+      // Minimal stand-in for the DSH client-module envelope.
+      const pending = [];
+      window.__ModuleLoader__ = { load: (reg) => pending.push(reg) };
+    </script>
+    <script src="../lib/client.js"></script>
+    <script>
+      const reg = pending.find((r) => r.id === "dsh-ascii-ocean-bg");
+      // The real shell seeds React and the client packages; here the section is
+      // never rendered, so an empty module is enough to satisfy the imports.
+      const plugin = reg.factory((specifier) => {
+        if (specifier === "react" || specifier === "react/jsx-runtime") return {};
+        throw new Error("unexpected external: " + specifier);
+      });
+      // `slots` and `locale` are inert: this page only exercises the canvas, and
+      // the settings registration is happy to land on no-op services.
+      plugin.apply({
+        effect(fn) {
+          fn();
+        },
+        slots: {
+          inject: () => () => {},
+          register: () => () => {},
+        },
+        locale: {
+          bind: () => (key) => key,
+          register: () => () => {},
+        },
+        logger: console,
+      });
+    </script>
+  </body>
+</html>

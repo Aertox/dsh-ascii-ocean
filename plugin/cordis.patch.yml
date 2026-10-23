@@ -1,0 +1,6 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack.
+# The package is client-only for the browser — its host half (lib/index.js) is a
+# no-op so client-modules has a live loader entry to serve the bundle from.
+- insert:
+    - id: ascii-ocean-bg
+      name: 'dsh-ascii-ocean-bg'
