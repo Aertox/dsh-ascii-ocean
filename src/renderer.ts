@@ -7,7 +7,8 @@
  *      shaded by the light, dense glyphs, and shimmering accent colours
  */
 import { clamp, hash3, smoothstep } from "./math";
-import { SHARK_NODES, type Shark, type SharkKind, type World } from "./world";
+import { SHARK_NODES, type Shark, type SharkKind, type Whale, type World } from "./world";
+import type { WhaleKind } from "./whale";
 
 const ALPHA_LEVELS = 6;
 const FISH_ALPHAS = [0.28, 0.42, 0.58, 0.74, 0.9];
@@ -55,19 +56,24 @@ function classicHalfWidth(s: number) {
   return 0.019 * (1 - k) + 0.012 * Math.sin(k * Math.PI);
 }
 
-/** Body outline and fin layout per species. All values are fractions of length. */
-interface SharkShape {
+/** Body outline and fin layout per animal. All values are fractions of length. */
+interface BodyShape {
   halfWidth: (s: number) => number;
   /** Pectoral fin: leading root, trailing root, tip position along the body, and reach. */
   pectoral: [number, number, number, number];
   /** Notched (falcate) trailing edge on the pectorals. */
   falcate: boolean;
-  /** Pelvic fins: leading root, trailing root, tip, reach. */
-  pelvic: [number, number, number, number];
+  /** Pelvic fins: leading root, trailing root, tip, reach. Absent on whales. */
+  pelvic?: [number, number, number, number];
   /** Forked caudal fin reach, or 0 when the tail is a ribbon (zebra shark). */
   caudal: number;
+  /**
+   * Whale flukes instead of a shark's forked tail: a swept lobe each side with
+   * a notch at the centre, so the trailing edge reads as two blades.
+   */
+  fluke?: boolean;
   dorsal: [number, number];
-  secondDorsal: [number, number];
+  secondDorsal?: [number, number];
   /**
    * Hammerheads' cephalofoil: half-span, how far its tips sweep back, its depth, and the
    * notch in the middle of the front edge. All fractions of length; absent for other sharks.
@@ -75,12 +81,25 @@ interface SharkShape {
   head?: { span: number; sweep: number; depth: number; notch: number };
   /** null when the eyes sit somewhere else (hammerhead: on the cephalofoil tips). */
   eye: [number, number] | null;
-  gills: [number, number];
+  /** Five gill slits, as a band along the body. Absent on whales, which have a blowhole. */
+  gills?: [number, number];
+  /** A blowhole on top of the snout: a dark puckered spot instead of gills. */
+  blowhole?: boolean;
+  /**
+   * How fast the lit back falls off into shadow toward the flanks. Sharks are
+   * round, so the default is steep; a whale's back is broad and flat.
+   */
+  falloff?: number;
+  /**
+   * Skin texture. Dark marks: tiger bars, zebra spots, humpback tubercles.
+   * Pale species patterns: blue whale mottling; sperm whale wrinkles.
+   */
+  markStyle?: "tiger" | "zebra" | "tubercle" | "mottle" | "wrinkle";
   /** Skin colour multipliers (r, g, b). */
   tint: [number, number, number];
 }
 
-const SHAPES: Record<SharkKind, SharkShape> = {
+const SHAPES: Record<SharkKind, BodyShape> = {
   classic: {
     halfWidth: classicHalfWidth,
     pectoral: [0.15, 0.43, 0.55, 0.26],
@@ -129,6 +148,7 @@ const SHAPES: Record<SharkKind, SharkShape> = {
     secondDorsal: [0.71, 0.75],
     eye: [0.08, 0.12],
     gills: [0.19, 0.28],
+    markStyle: "tiger",
     tint: [1.02, 0.95, 0.84],
   },
   // Short rounded head, body done by half-length, then a long ribbon of a
@@ -149,6 +169,7 @@ const SHAPES: Record<SharkKind, SharkShape> = {
     secondDorsal: [0.49, 0.53],
     eye: [0.06, 0.09],
     gills: [0.13, 0.2],
+    markStyle: "zebra",
     tint: [1.08, 0.97, 0.74],
   },
   // Great hammerhead: a broader, nearly straight-edged cephalofoil with a notch at the centre,
@@ -233,7 +254,93 @@ const SHAPES: Record<SharkKind, SharkShape> = {
   },
 };
 
-const KINDS = Object.keys(SHAPES) as SharkKind[];
+/**
+ * Whales, drawn by the same rasteriser as the sharks but built to a different
+ * scale: no gills (a blowhole instead), no pelvic fins, broad flukes rather
+ * than a forked tail, and skin patterns made of pale flecks, knobs and folds.
+ * All values are fractions of length, like SHAPES above.
+ */
+const WHALE_SHAPES: Record<WhaleKind, BodyShape> = {
+  // Blue whale: a broad, rounded head flowing into a long, even taper, a
+  // dorsal fin the size of a thumbnail set right at the tail, and wide swept
+  // flukes. Slate-blue, dappled with pale mottling.
+  bluewhale: {
+    halfWidth: (s) => {
+      // Wide, rounded rostrum: blunt in front, fullest a third of the way back.
+      if (s < 0.24) return 0.104 * Math.pow(Math.sin(((s / 0.24) * Math.PI) / 2), 0.5);
+      if (s < 0.34) return 0.104 + 0.011 * smoothstep(0.24, 0.34, s);
+      // The taper: barely any waist until the last fifth of the body.
+      if (s < 0.86) return 0.03 + 0.085 * Math.pow(1 - (s - 0.34) / 0.52, 1.15);
+      const k = (s - 0.86) / 0.14;
+      return 0.03 * (1 - k) + 0.013 * Math.sin(k * Math.PI);
+    },
+    pectoral: [0.14, 0.37, 0.3, 0.19],
+    falcate: false,
+    fluke: true,
+    caudal: 0.14,
+    dorsal: [0.82, 0.865],
+    eye: [0.115, 0.14],
+    blowhole: true,
+    falloff: 0.3,
+    markStyle: "mottle",
+    tint: [0.88, 0.99, 1.18],
+  },
+  // Humpback: stocky and knobbly — tubercles across the rostrum, scythe
+  // pectorals reaching a third of the body, a stubby dorsal hump, then a row
+  // of knuckles on the tail stock. Near-black above, wide pale flukes.
+  humpback: {
+    halfWidth: (s) => {
+      if (s < 0.14) return 0.096 * Math.pow(Math.sin(((s / 0.14) * Math.PI) / 2), 0.42);
+      if (s < 0.3) return 0.096 + 0.022 * smoothstep(0.14, 0.3, s);
+      // Plump: keeps its girth much further back than a shark would.
+      if (s < 0.86) return 0.045 + 0.073 * Math.pow(1 - (s - 0.3) / 0.56, 1.05);
+      const k = (s - 0.86) / 0.14;
+      return 0.045 * (1 - k) + 0.011 * Math.sin(k * Math.PI);
+    },
+    pectoral: [0.15, 0.36, 0.31, 0.31],
+    falcate: false,
+    fluke: true,
+    caudal: 0.185,
+    dorsal: [0.54, 0.62],
+    secondDorsal: [0.67, 0.8],
+    eye: [0.075, 0.1],
+    blowhole: true,
+    falloff: 0.3,
+    markStyle: "tubercle",
+    tint: [0.78, 0.86, 1.02],
+  },
+  // Sperm whale: a third of the body is a blunt, squared head; no dorsal fin,
+  // just a low hump; loose wrinkled skin over the whole front half, and broad
+  // squarish flukes. Charcoal grey with a cold cast.
+  spermwhale: {
+    halfWidth: (s) => {
+      // Almost no taper for the first third: the head is a rounded block.
+      if (s < 0.3) return 0.099 * Math.pow(Math.sin(((s / 0.3) * Math.PI) / 2), 0.3);
+      if (s < 0.36) return 0.099 + 0.006 * smoothstep(0.3, 0.36, s);
+      if (s < 0.88) return 0.034 + 0.071 * Math.pow(1 - (s - 0.36) / 0.52, 1.05);
+      const k = (s - 0.88) / 0.12;
+      return 0.034 * (1 - k) + 0.008 * Math.sin(k * Math.PI);
+    },
+    pectoral: [0.19, 0.38, 0.31, 0.12],
+    falcate: false,
+    fluke: true,
+    caudal: 0.12,
+    dorsal: [0.56, 0.66],
+    eye: [0.3, 0.33],
+    blowhole: true,
+    falloff: 0.3,
+    markStyle: "wrinkle",
+    tint: [0.82, 0.9, 1.06],
+  },
+};
+
+const SHARK_KINDS = Object.keys(SHAPES) as SharkKind[];
+const WHALE_KINDS = Object.keys(WHALE_SHAPES) as WhaleKind[];
+/** Shark kinds first, then whale kinds: the body-cell kind index runs down this list. */
+const BODY_TINTS: [number, number, number][] = [
+  ...SHARK_KINDS.map((k) => SHAPES[k].tint),
+  ...WHALE_KINDS.map((k) => WHALE_SHAPES[k].tint),
+];
 
 function inTriangle(
   px: number, py: number,
@@ -402,7 +509,7 @@ export class AsciiRenderer {
     const t = world.time;
 
     this.consumeEvents(world);
-    this.rasterizeSharks(world.sharks, t);
+    this.rasterizeBodies(world.sharks, world.whales, t);
     this.depositWake(world);
     this.diffuse(dt);
 
@@ -469,6 +576,13 @@ export class AsciiRenderer {
       for (let k = SHARK_NODES - 6; k < SHARK_NODES; k++) {
         const i = this.cellIndex(sh.nodes[k * 2], sh.nodes[k * 2 + 1]);
         if (i >= 0) energy[i] = Math.min(1.6, energy[i] + 0.05 + sh.speed * 0.0012);
+      }
+    }
+    for (const wh of world.whales) {
+      // A whale's fluke shoves a lot of water: a broader, brighter wake.
+      for (let k = SHARK_NODES - 7; k < SHARK_NODES; k++) {
+        const i = this.cellIndex(wh.nodes[k * 2], wh.nodes[k * 2 + 1]);
+        if (i >= 0) energy[i] = Math.min(1.6, energy[i] + 0.075 + wh.speed * 0.002);
       }
     }
     if (world.pointer.active) {
@@ -560,26 +674,37 @@ export class AsciiRenderer {
       const across = a / (w || 1);
       // Rounded back lit from the top-left; flanks fall off into shadow.
       const facing = (bestNx * -0.6 + bestNy * -0.8) * across;
-      let shade = 0.58 - across * across * 0.42 + facing * 0.26;
+      let shade = 0.58 - across * across * (shape.falloff ?? 0.42) + facing * 0.26;
       let flag = FLAG_BODY;
+      const markStyle = shape.markStyle;
       if (s > shape.dorsal[0] && s < shape.dorsal[1] && across < 0.3) {
-        // First dorsal fin, catching the light.
+        // Dorsal fin, catching the light.
         flag = FLAG_RIDGE;
         shade = 1;
-      } else if (s > shape.secondDorsal[0] && s < shape.secondDorsal[1] && across < 0.4) {
+      } else if (shape.secondDorsal && s > shape.secondDorsal[0] && s < shape.secondDorsal[1] && across < 0.4) {
         shade = Math.max(shade, 0.82);
+      } else if (shape.blowhole && s < 0.028 && across < 0.3) {
+        // Blowhole: a small dark puckered spot on top of the snout.
+        flag = FLAG_EYE;
+        shade = 0;
       } else if (shape.eye && s > shape.eye[0] && s < shape.eye[1] && across > 0.6) {
         flag = FLAG_EYE;
         shade = 0;
-      } else if (s > shape.gills[0] && s < shape.gills[1] && across > 0.58) {
+      } else if (shape.gills && s > shape.gills[0] && s < shape.gills[1] && across > 0.58) {
         // Five gill slits.
         if (Math.floor(((s - shape.gills[0]) / (shape.gills[1] - shape.gills[0])) * 5) % 2 === 0) shade *= 0.45;
       } else if (s < 0.05) {
         // Pale snout tip.
         shade = Math.max(shade, 0.7);
-      } else if (shape === SHAPES.zebra && s > 0.08 && s < 0.55 && (across < 0.1 || Math.abs(across - 0.6) < 0.08)) {
+      } else if (markStyle === "zebra" && s > 0.08 && s < 0.55 && (across < 0.1 || Math.abs(across - 0.6) < 0.08)) {
         // Zebra sharks carry pale ridges down the back.
         shade = Math.max(shade, 0.8);
+      } else if (markStyle === "mottle" && this.mottle(s, a * bestSign, L)) {
+        // Blue whale: pale flecks over the whole back, catching the light.
+        shade = Math.min(1, shade + 0.34);
+      } else if (markStyle === "wrinkle" && s < 0.4) {
+        // Sperm whale: loose creases running with the body over the head.
+        shade *= 1 - 0.16 * (0.5 + 0.5 * Math.sin(across * 22 + s * 6));
       } else if (this.marked(s, a * bestSign, L, across)) {
         flag = FLAG_MARK;
       }
@@ -599,12 +724,19 @@ export class AsciiRenderer {
       this.hitShade = 0.38 + 0.22 * (1 - clamp(a / tip, 0, 1));
       return true;
     }
-    const [v0, v1, v2, vr] = shape.pelvic;
-    if (
-      inTriangle(u, a, L * v0, 0, L * v1, 0, L * v2, L * vr) ||
-      // Forked caudal fin.
-      (shape.caudal > 0 && inTriangle(u, a, L * 0.86, 0, L * 0.95, 0, L, L * shape.caudal))
-    ) {
+    let pelvicHit = false;
+    if (shape.pelvic) {
+      const [v0, v1, v2, vr] = shape.pelvic;
+      pelvicHit = inTriangle(u, a, L * v0, 0, L * v1, 0, L * v2, L * vr);
+    }
+    // Tail: a shark's forked caudal fin, or a whale's broad flukes — a swept
+    // lobe each side with a notch down the middle.
+    const tailHit =
+      shape.caudal > 0 &&
+      (shape.fluke
+        ? a > L * 0.02 && inTriangle(u, a, L * 0.84, 0, L * 0.94, L * shape.caudal, L * 0.99, 0)
+        : inTriangle(u, a, L * 0.86, 0, L * 0.95, 0, L, L * shape.caudal));
+    if (pelvicHit || tailHit) {
       this.hitFlag = FLAG_FIN;
       this.hitShade = 0.36;
       return true;
@@ -614,133 +746,184 @@ export class AsciiRenderer {
 
   /** Whether a body point (s along, v across) falls on a dark marking. */
   private marked(s: number, v: number, L: number, across: number) {
-    if (this.shape === SHAPES.tiger) {
-      // Wavy vertical bars over the back half, fading out toward the head.
-      if (s < 0.2 || s > 0.9 || across > 0.85) return false;
-      const wobble = 0.35 * Math.sin((v / L) * 25 + s * 5);
-      const bar = Math.sin(s * Math.PI * 2 * 9 + wobble);
-      return bar > 0.65 - 0.5 * smoothstep(0.2, 0.42, s) + 0.4 * smoothstep(0.8, 0.9, s);
+    switch (this.shape.markStyle) {
+      case "tiger": {
+        // Wavy vertical bars over the back half, fading out toward the head.
+        if (s < 0.2 || s > 0.9 || across > 0.85) return false;
+        const wobble = 0.35 * Math.sin((v / L) * 25 + s * 5);
+        const bar = Math.sin(s * Math.PI * 2 * 9 + wobble);
+        return bar > 0.65 - 0.5 * smoothstep(0.2, 0.42, s) + 0.4 * smoothstep(0.8, 0.9, s);
+      }
+      case "zebra": {
+        // Leopard spots on a jittered grid, so they ride along with the skin.
+        if (s < 0.07) return false;
+        const gu = (s * L) / (L * 0.06);
+        const gv = v / (L * 0.045);
+        const cu = Math.floor(gu);
+        const cv = Math.floor(gv);
+        const jx = hash3(cu, cv, this.sharkId) * 0.5 + 0.25;
+        const jy = hash3(cu, cv, this.sharkId + 11) * 0.5 + 0.25;
+        return (gu - cu - jx) ** 2 + (gv - cv - jy) ** 2 < 0.08;
+      }
+      case "tubercle": {
+        // Humpback: knobs strewn across the rostrum, riding with the skin.
+        if (s > 0.14) return false;
+        const gu = (s * L) / (L * 0.035);
+        const gv = v / (L * 0.03);
+        return hash3(Math.floor(gu), Math.floor(gv), this.sharkId + 31) < 0.34;
+      }
+      default:
+        return false;
     }
-    if (this.shape === SHAPES.zebra) {
-      // Leopard spots on a jittered grid, so they ride along with the skin.
-      if (s < 0.07) return false;
-      const gu = (s * L) / (L * 0.06);
-      const gv = v / (L * 0.045);
-      const cu = Math.floor(gu);
-      const cv = Math.floor(gv);
-      const jx = hash3(cu, cv, this.sharkId) * 0.5 + 0.25;
-      const jy = hash3(cu, cv, this.sharkId + 11) * 0.5 + 0.25;
-      return (gu - cu - jx) ** 2 + (gv - cv - jy) ** 2 < 0.08;
-    }
-    return false;
+  }
+
+  /** Blue whale mottling: sparse pale flecks on a jittered grid. */
+  private mottle(s: number, v: number, L: number) {
+    if (s < 0.05 || s > 0.9) return false;
+    const gu = (s * L) / (L * 0.042);
+    const gv = v / (L * 0.032);
+    const cu = Math.floor(gu);
+    const cv = Math.floor(gv);
+    const jx = hash3(cu, cv, this.sharkId) * 0.7 + 0.15;
+    const jy = hash3(cu, cv, this.sharkId + 13) * 0.7 + 0.15;
+    return (gu - cu - jx) ** 2 + (gv - cv - jy) ** 2 < 0.05;
   }
 
   /**
-   * Build a smooth, undulating render spine from the sim spine, then
-   * supersample every cell in the shark's bounding box against the shape.
+   * Build a smooth, undulating render spine from each sim spine, then
+   * supersample every cell in the body's bounding box against its shape.
    * Fully covered cells become solid skin; partial cells become edge glyphs.
+   * Sharks and whales share this pass, so a whale's hide is shaded exactly
+   * like a shark's — it is only much larger.
    */
-  private rasterizeSharks(sharks: Shark[], t: number) {
-    const { sharkFlag, sharkShade, sharkKey, sharkDepth, sharkKind, sharkShadow, spine, arc, cw, ch, cols, rows } = this;
-    sharkFlag.fill(0);
-    sharkShadow.fill(0);
+  private rasterizeBodies(sharks: Shark[], whales: Whale[], t: number) {
+    this.sharkFlag.fill(0);
+    this.sharkShadow.fill(0);
 
     for (const sh of sharks) {
-      const L = sh.length;
-      const N = SHARK_NODES;
-      const n = sh.nodes;
-      const swim = clamp(sh.speed / 60, 0.4, 1.4);
-      this.shape = SHAPES[sh.kind];
-      this.sharkId = sh.id;
-      const kindIndex = KINDS.indexOf(sh.kind);
+      this.rasterizeBody(
+        sh.nodes, sh.length, sh.speed, sh.turn, sh.phase, sh.id, sh.depth,
+        SHAPES[sh.kind], SHARK_KINDS.indexOf(sh.kind), t,
+      );
+    }
+    // Whales last, so a passing giant covers the smaller bodies behind it.
+    for (const wh of whales) {
+      this.rasterizeBody(
+        wh.nodes, wh.length, wh.speed, wh.turn, wh.phase, wh.id, wh.depth,
+        WHALE_SHAPES[wh.kind], SHARK_KINDS.length + WHALE_KINDS.indexOf(wh.kind), t,
+        // Whales beat a slow, deep, wide wave rather than a shark's ripple.
+        0.075, 2.6,
+      );
+    }
+  }
 
-      // Travelling body wave, growing toward the tail.
-      for (let k = 0; k < N; k++) {
-        const s = k / (N - 1);
-        const a = Math.max(0, k - 1);
-        const b = Math.min(N - 1, k + 1);
-        let tx = n[a * 2] - n[b * 2];
-        let ty = n[a * 2 + 1] - n[b * 2 + 1];
-        const tl = Math.hypot(tx, ty) || 1;
-        tx /= tl;
-        ty /= tl;
-        const amp = L * 0.05 * (0.1 + 0.9 * Math.pow(s, 1.8)) * swim;
-        const off = amp * Math.sin(sh.phase - s * 5.2);
-        spine[k * 2] = n[k * 2] - ty * off;
-        spine[k * 2 + 1] = n[k * 2 + 1] + tx * off;
-      }
-      arc[0] = 0;
-      for (let k = 1; k < N; k++) {
-        arc[k] =
-          arc[k - 1] +
-          Math.hypot(spine[k * 2] - spine[(k - 1) * 2], spine[k * 2 + 1] - spine[(k - 1) * 2 + 1]);
-      }
-      this.arcTotal = arc[N - 1] || 1;
+  /** Rasterise one body — shark or whale — into the shared body-cell fields. */
+  private rasterizeBody(
+    n: Float32Array,
+    L: number,
+    speed: number,
+    turn: number,
+    phase: number,
+    id: number,
+    depth: number,
+    shape: BodyShape,
+    kindIndex: number,
+    t: number,
+    waveAmp = 0.05,
+    waveK = 5.2,
+  ) {
+    const { sharkFlag, sharkShade, sharkKey, sharkDepth, sharkKind, sharkShadow, spine, arc, cw, ch, cols, rows } = this;
+    const N = SHARK_NODES;
+    const swim = clamp(speed / 60, 0.4, 1.4);
+    this.shape = shape;
+    this.sharkId = id;
 
-      // Bank into turns: the inside fin foreshortens, the outside one spreads.
-      const bank = clamp(sh.turn * 0.45, -0.35, 0.35);
-      const flex = 1 + 0.06 * Math.sin(sh.phase * 0.5);
-      const reachFin = this.shape.pectoral[3];
-      this.finTipRight = L * reachFin * flex * (1 - bank);
-      this.finTipLeft = L * reachFin * flex * (1 + bank);
+    // Travelling body wave, growing toward the tail.
+    for (let k = 0; k < N; k++) {
+      const s = k / (N - 1);
+      const a = Math.max(0, k - 1);
+      const b = Math.min(N - 1, k + 1);
+      let tx = n[a * 2] - n[b * 2];
+      let ty = n[a * 2 + 1] - n[b * 2 + 1];
+      const tl = Math.hypot(tx, ty) || 1;
+      tx /= tl;
+      ty /= tl;
+      const amp = L * waveAmp * (0.1 + 0.9 * Math.pow(s, 1.8)) * swim;
+      const off = amp * Math.sin(phase - s * waveK);
+      spine[k * 2] = n[k * 2] - ty * off;
+      spine[k * 2 + 1] = n[k * 2 + 1] + tx * off;
+    }
+    arc[0] = 0;
+    for (let k = 1; k < N; k++) {
+      arc[k] =
+        arc[k - 1] +
+        Math.hypot(spine[k * 2] - spine[(k - 1) * 2], spine[k * 2 + 1] - spine[(k - 1) * 2 + 1]);
+    }
+    this.arcTotal = arc[N - 1] || 1;
 
-      let minX = Infinity;
-      let minY = Infinity;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (let k = 0; k < N; k++) {
-        minX = Math.min(minX, spine[k * 2]);
-        maxX = Math.max(maxX, spine[k * 2]);
-        minY = Math.min(minY, spine[k * 2 + 1]);
-        maxY = Math.max(maxY, spine[k * 2 + 1]);
-      }
-      const reach = L * 0.36;
-      const c0 = Math.max(0, Math.floor((minX - reach) / cw));
-      const c1 = Math.min(cols - 1, Math.floor((maxX + reach) / cw));
-      const r0 = Math.max(0, Math.floor((minY - reach) / ch));
-      const r1 = Math.min(rows - 1, Math.floor((maxY + reach) / ch));
-      if (c0 > c1 || r0 > r1) continue;
+    // Bank into turns: the inside fin foreshortens, the outside one spreads.
+    const bank = clamp(turn * 0.45, -0.35, 0.35);
+    const flex = 1 + 0.06 * Math.sin(phase * 0.5);
+    const reachFin = shape.pectoral[3];
+    this.finTipRight = L * reachFin * flex * (1 - bank);
+    this.finTipLeft = L * reachFin * flex * (1 + bank);
 
-      const skipBeyond = reach + Math.hypot(cw, ch);
-      const shadowDc = Math.round((L * 0.035) / cw) + 1;
-      const shadowDr = Math.round((L * 0.02) / ch) + 1;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (let k = 0; k < N; k++) {
+      minX = Math.min(minX, spine[k * 2]);
+      maxX = Math.max(maxX, spine[k * 2]);
+      minY = Math.min(minY, spine[k * 2 + 1]);
+      maxY = Math.max(maxY, spine[k * 2 + 1]);
+    }
+    const reach = L * 0.36;
+    const c0 = Math.max(0, Math.floor((minX - reach) / cw));
+    const c1 = Math.min(cols - 1, Math.floor((maxX + reach) / cw));
+    const r0 = Math.max(0, Math.floor((minY - reach) / ch));
+    const r1 = Math.min(rows - 1, Math.floor((maxY + reach) / ch));
+    if (c0 > c1 || r0 > r1) return;
 
-      for (let r = r0; r <= r1; r++) {
-        for (let c = c0; c <= c1; c++) {
-          const x = c * cw;
-          const y = r * ch;
-          const centerHit = this.sampleShark(x + cw / 2, y + ch / 2, L);
-          if (!centerHit && this.hitDist > skipBeyond) continue;
-          const flag = this.hitFlag;
-          const shade = this.hitShade;
-          const s = this.hitS;
-          const v = this.hitV;
+    const skipBeyond = reach + Math.hypot(cw, ch);
+    const shadowDc = Math.round((L * 0.035) / cw) + 1;
+    const shadowDr = Math.round((L * 0.02) / ch) + 1;
 
-          let hits = centerHit ? 1 : 0;
-          for (let k = 0; k < SUBSAMPLES.length; k += 2) {
-            if (this.sampleShark(x + SUBSAMPLES[k] * cw, y + SUBSAMPLES[k + 1] * ch, L)) hits++;
-          }
-          if (hits === 0) continue;
-          const coverage = hits / 5;
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
+        const x = c * cw;
+        const y = r * ch;
+        const centerHit = this.sampleShark(x + cw / 2, y + ch / 2, L);
+        if (!centerHit && this.hitDist > skipBeyond) continue;
+        const flag = this.hitFlag;
+        const shade = this.hitShade;
+        const s = this.hitS;
+        const v = this.hitV;
 
-          const i = r * cols + c;
-          // Body-anchored key so each glyph rides along with the skin.
-          const key = (hash3(Math.round(s * 52), Math.round(v / (cw * 0.9)), sh.id) * 4294967295) >>> 0;
-          sharkKey[i] = key;
-          sharkDepth[i] = sh.depth;
-          sharkKind[i] = kindIndex;
+        let hits = centerHit ? 1 : 0;
+        for (let k = 0; k < SUBSAMPLES.length; k += 2) {
+          if (this.sampleShark(x + SUBSAMPLES[k] * cw, y + SUBSAMPLES[k + 1] * ch, L)) hits++;
+        }
+        if (hits === 0) continue;
+        const coverage = hits / 5;
 
-          if (centerHit && coverage >= 0.6) {
-            sharkFlag[i] = flag;
-            const flicker = (hash3(c, r, Math.floor(t * 6)) - 0.5) * 0.06;
-            sharkShade[i] = clamp(shade + flicker, 0, 1);
-            const sc = c + shadowDc;
-            const sr = r + shadowDr;
-            if (sc < cols && sr < rows) sharkShadow[sr * cols + sc] = 1;
-          } else {
-            sharkFlag[i] = FLAG_EDGE;
-            sharkShade[i] = coverage;
-          }
+        const i = r * cols + c;
+        // Body-anchored key so each glyph rides along with the skin.
+        const key = (hash3(Math.round(s * 52), Math.round(v / (cw * 0.9)), id) * 4294967295) >>> 0;
+        sharkKey[i] = key;
+        sharkDepth[i] = depth;
+        sharkKind[i] = kindIndex;
+
+        if (centerHit && coverage >= 0.6) {
+          sharkFlag[i] = flag;
+          const flicker = (hash3(c, r, Math.floor(t * 6)) - 0.5) * 0.06;
+          sharkShade[i] = clamp(shade + flicker, 0, 1);
+          const sc = c + shadowDc;
+          const sr = r + shadowDr;
+          if (sc < cols && sr < rows) sharkShadow[sr * cols + sc] = 1;
+        } else {
+          sharkFlag[i] = FLAG_EDGE;
+          sharkShade[i] = coverage;
         }
       }
     }
@@ -759,10 +942,13 @@ export class AsciiRenderer {
       const key = sharkKey[i];
       const shade = sharkShade[i];
       const dim = 0.7 + 0.3 * sharkDepth[i];
-      const [tr, tg, tb] = SHAPES[KINDS[sharkKind[i]]].tint;
+      const [tr, tg, tb] = BODY_TINTS[sharkKind[i]];
 
-      // Colours re-roll on a staggered clock so the hide shimmers.
-      const tick = Math.floor(t * 2.4 + (key % 997) / 97);
+      // Colours re-roll on a staggered clock so the hide shimmers. A whale is
+      // a big matte mass, so it gets far fewer sparkles than a small shark.
+      const isWhale = sharkKind[i] >= SHARK_KINDS.length;
+      const spark = isWhale ? 0.03 : 0.09;
+      const tick = Math.floor(t * (isWhale ? 1.1 : 2.4) + (key % 997) / 97);
       const roll = hash3(key, tick, 7);
 
       if (flag === FLAG_EDGE) {
@@ -770,7 +956,7 @@ export class AsciiRenderer {
         const set = shade >= 0.5 ? EDGE_HEAVY : EDGE_LIGHT;
         const g = (70 + shade * 80) * dim;
         ctx.fillStyle =
-          roll < 0.07
+          roll < spark * 0.78
             ? ACCENTS[key % ACCENTS.length]
             : `rgb(${Math.round(g * tr)},${Math.round(g * tg)},${Math.min(255, Math.round(g * tb + 6))})`;
         ctx.fillText(set[(key >>> 8) % set.length], x + cw / 2, y + ch / 2 + 1);
@@ -804,8 +990,8 @@ export class AsciiRenderer {
       let color: string;
       if (flag === FLAG_EYE) color = "#9aa0ad";
       else if (flag === FLAG_MARK) color = `rgb(${Math.round(70 * tr)},${Math.round(70 * tg)},${Math.round(70 * tb)})`;
-      else if (roll < 0.09) color = ACCENTS[key % ACCENTS.length];
-      else if (roll < 0.13) color = "#ffffff";
+      else if (roll < spark) color = ACCENTS[key % ACCENTS.length];
+      else if (roll < spark * 1.44) color = "#ffffff";
       else color = shade > 0.55 ? "#0e0f13" : "#1b1d24";
       ctx.fillStyle = color;
       ctx.fillText(glyph, x + cw / 2, y + ch / 2 + 1);

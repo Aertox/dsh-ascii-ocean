@@ -1,5 +1,6 @@
 import { AsciiRenderer } from "./renderer";
 import { World, type SharkSpec } from "./world";
+import type { WhaleSpec } from "./whale";
 
 const STEP = 1 / 60;
 const MAX_STEPS = 4;
@@ -14,14 +15,18 @@ export class OceanEngine {
   private raf = 0;
   private last = 0;
   private acc = 0;
+  /** Minimum wall time between paints, in ms; `0` means uncapped. */
+  private capMs = 0;
+  /** Timestamp of the last painted frame (not of the last callback). */
+  private lastPaint = 0;
   private visible = true;
   private reducedMotion: MediaQueryList;
   private resizeObserver: ResizeObserver;
   private intersectionObserver: IntersectionObserver;
   private disposed = false;
 
-  constructor(private canvas: HTMLCanvasElement, sharks?: SharkSpec[]) {
-    this.world = new World(sharks);
+  constructor(private canvas: HTMLCanvasElement, sharks?: SharkSpec[], whales?: WhaleSpec[]) {
+    this.world = new World(sharks, undefined, whales);
     this.renderer = new AsciiRenderer(canvas);
     this.renderer.setFontFamily(getComputedStyle(canvas).fontFamily);
     this.reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -73,10 +78,36 @@ export class OceanEngine {
     cancelAnimationFrame(this.raf);
     if (this.disposed || !this.visible || this.reducedMotion.matches) return;
     this.last = performance.now();
+    this.lastPaint = 0;
     this.raf = requestAnimationFrame(this.frame);
   }
 
+  /**
+   * Cap how often the canvas is painted, in frames per second.
+   *
+   * The simulation keeps its fixed timestep: a skipped animation frame only
+   * defers the paint, and the next paint advances the world by the elapsed
+   * wall time (up to MAX_STEPS). So 30 fps still moves at the same speed as
+   * 60 fps, it just draws half as often — which is where the CPU goes.
+   *
+   * @param fps - ceiling in frames per second; `0` or a non-positive value removes it.
+   */
+  setFrameCap(fps: number) {
+    const next = Number.isFinite(fps) && fps > 0 ? 1000 / fps : 0;
+    if (next === this.capMs) return;
+    this.capMs = next;
+    this.lastPaint = 0;
+    this.schedule();
+  }
+
   private frame = (now: number) => {
+    // Gate before doing any work: on a 120Hz display a 30 fps cap means this
+    // callback returns immediately three times out of four.
+    if (this.capMs > 0 && this.lastPaint && now - this.lastPaint < this.capMs - 1) {
+      this.raf = requestAnimationFrame(this.frame);
+      return;
+    }
+    this.lastPaint = now;
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
     this.acc += dt;

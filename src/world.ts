@@ -12,9 +12,15 @@
  * They prefer fish in sparse spots, since dense schools confuse predators,
  * so stragglers get picked off. Eaten fish come back later as new schools
  * swimming in from the edges, which keeps the population steady.
+ *
+ * Whales: the same spine, driven by a much lazier steering pass — no hunger,
+ * no hunt, just a wide patrol that turns like a supertanker. Fish give them a
+ * gentle berth instead of bolting, and sharks dodge them. Opt-in per canvas
+ * through WhaleSpec[] so the shark-only hero stays untouched.
  */
 import { angleDiff, clamp, current, rand, randInt, TAU } from "./math";
 import { pickSpecies, SPECIES } from "./species";
+import { DEFAULT_WHALES, WHALE_CONFIG, whaleSize, type WhaleKind, type WhaleSpec } from "./whale";
 
 export const SHARK_NODES = 20;
 
@@ -73,6 +79,30 @@ export interface Shark {
   depth: number;
 }
 
+/**
+ * A whale. Same spine-driven swimming as a shark, but it never hunts: no
+ * hunger, no target, no feeding. It is a slow moving landmark that happens to
+ * be the biggest thing in the water.
+ */
+export interface Whale {
+  id: number;
+  kind: WhaleKind;
+  length: number;
+  /** Spine positions, snout first: [x0, y0, x1, y1, ...]. */
+  nodes: Float32Array;
+  heading: number;
+  speed: number;
+  /** Tail-beat phase; a whale's beats are slow and deep. */
+  phase: number;
+  /** Smoothed angular velocity (rad/s); the flukes swing against the turn. */
+  turn: number;
+  wander: number;
+  orbitDir: 1 | -1;
+  orbitRadius: number;
+  /** 0 far / dim → 1 near / bright. */
+  depth: number;
+}
+
 export interface WorldEvent {
   kind: "eat" | "splash";
   x: number;
@@ -91,6 +121,7 @@ export class World {
   time = 0;
   fish: Fish[] = [];
   sharks: Shark[] = [];
+  whales: Whale[] = [];
   events: WorldEvent[] = [];
   pointer = { x: 0, y: 0, active: false };
 
@@ -107,11 +138,14 @@ export class World {
   private bucketNext = new Int32Array(0);
   private lastSpawn = 0;
   private tmp = { x: 0, y: 0 };
+  /** Scratch for bodyFear(), so the fish loop allocates nothing. */
+  private fearTmp = { x: 0, y: 0, fear: 0 };
 
   /** fishCount overrides the area-based population (the sidebar wants a single small school). */
   constructor(
     private sharkSpecs: SharkSpec[] = DEFAULT_SHARKS,
     private fishCount?: number,
+    private whaleSpecs: WhaleSpec[] = DEFAULT_WHALES,
   ) {}
 
   resize(width: number, height: number, cellW: number, cellH: number) {
@@ -150,17 +184,11 @@ export class World {
       const x = W / 2 + Math.cos(a) * orbitRadius * (W / minSide) * 0.9;
       const y = H / 2 + Math.sin(a) * orbitRadius;
       const heading = a + (orbitDir * Math.PI) / 2;
-      const nodes = new Float32Array(SHARK_NODES * 2);
-      const seg = length / (SHARK_NODES - 1);
-      for (let n = 0; n < SHARK_NODES; n++) {
-        nodes[n * 2] = x - Math.cos(heading) * seg * n;
-        nodes[n * 2 + 1] = y - Math.sin(heading) * seg * n;
-      }
       this.sharks.push({
         id: i + 1,
         kind,
         length,
-        nodes,
+        nodes: this.buildSpine(x, y, heading, length),
         heading,
         speed: 30,
         phase: rand(0, TAU),
@@ -176,6 +204,35 @@ export class World {
     }
     // Smaller (farther) sharks draw first so the big one swims over them.
     this.sharks.sort((a, b) => a.length - b.length);
+
+    // Whales get their own, wider circuit: they are too big to share the
+    // sharks' laps without crowding the middle of the frame.
+    this.whales = [];
+    for (let i = 0; i < this.whaleSpecs.length; i++) {
+      const spec = this.whaleSpecs[i];
+      const cfg = WHALE_CONFIG[spec.kind];
+      const length = baseLength * whaleSize(spec);
+      const orbitRadius = minSide * rand(0.34, 0.48);
+      const a = (i / this.whaleSpecs.length) * TAU + rand(-0.3, 0.3);
+      const orbitDir: 1 | -1 = i % 2 === 0 ? 1 : -1;
+      const x = W / 2 + Math.cos(a) * orbitRadius * (W / minSide) * 0.85;
+      const y = H / 2 + Math.sin(a) * orbitRadius;
+      const heading = a + (orbitDir * Math.PI) / 2;
+      this.whales.push({
+        id: 1000 + i,
+        kind: spec.kind,
+        length,
+        nodes: this.buildSpine(x, y, heading, length),
+        heading,
+        speed: cfg.cruise,
+        phase: rand(0, TAU),
+        turn: 0,
+        wander: 0,
+        orbitDir,
+        orbitRadius,
+        depth: rand(0.6, 0.95),
+      });
+    }
 
     const total = this.fishCount ?? clamp(Math.round((W * H) / 4400), 85, 340);
     this.fish = [];
@@ -230,7 +287,19 @@ export class World {
     this.rebuildHash();
     this.stepFish(dt);
     this.stepSharks(dt);
+    this.stepWhales(dt);
     this.respawn();
+  }
+
+  /** Lay a straight spine out behind a snout position, snout first. */
+  private buildSpine(x: number, y: number, heading: number, length: number) {
+    const nodes = new Float32Array(SHARK_NODES * 2);
+    const seg = length / (SHARK_NODES - 1);
+    for (let n = 0; n < SHARK_NODES; n++) {
+      nodes[n * 2] = x - Math.cos(heading) * seg * n;
+      nodes[n * 2 + 1] = y - Math.sin(heading) * seg * n;
+    }
+    return nodes;
   }
 
   private rebuildHash() {
@@ -266,7 +335,7 @@ export class World {
   }
 
   private stepFish(dt: number) {
-    const { fish, sharks, pointer, width: W, height: H, time } = this;
+    const { fish, sharks, whales, pointer, width: W, height: H, time } = this;
     const R = this.perception;
     const R2 = R * R;
     const foreignSep = this.foreignSep;
@@ -369,33 +438,18 @@ export class World {
       // half of the shark, so fish also give the flanks a wide berth.
       let fear = 0;
       for (const sh of sharks) {
-        const fearR = sh.length * 0.6 + 60;
-        let best = Infinity;
-        let bx = 0;
-        let by = 0;
-        for (let k = 0; k <= 12; k += 3) {
-          const nx = sh.nodes[k * 2];
-          const ny = sh.nodes[k * 2 + 1];
-          const d2 = (f.x - nx) ** 2 + (f.y - ny) ** 2;
-          if (d2 < best) {
-            best = d2;
-            bx = nx;
-            by = ny;
-          }
-        }
-        const d = Math.sqrt(best);
-        if (d >= fearR || d < 1e-3) continue;
-        let w = 1 - d / fearR;
-        w *= w;
-        const awayX = (f.x - bx) / d;
-        const awayY = (f.y - by) / d;
-        // Fountain effect: break to whichever side of the shark's path you're on.
-        const shx = Math.cos(sh.heading);
-        const shy = Math.sin(sh.heading);
-        const side = shx * (f.y - sh.nodes[1]) - shy * (f.x - sh.nodes[0]) >= 0 ? 1 : -1;
-        ax += (awayX * 0.7 - shy * side * 0.9) * FISH_FLEE_K * w;
-        ay += (awayY * 0.7 + shx * side * 0.9) * FISH_FLEE_K * w;
-        fear = Math.max(fear, Math.sqrt(w));
+        const push = this.bodyFear(f, sh.nodes, sh.heading, sh.length, 1);
+        ax += push.x;
+        ay += push.y;
+        fear = Math.max(fear, push.fear);
+      }
+      // Whales: giants that eat nothing here. Schools do not bolt, they just
+      // part a little as the wall of blubber slides past.
+      for (const wh of whales) {
+        const push = this.bodyFear(f, wh.nodes, wh.heading, wh.length, 0.45);
+        ax += push.x;
+        ay += push.y;
+        fear = Math.max(fear, push.fear);
       }
 
       if (pointer.active) {
@@ -457,7 +511,7 @@ export class World {
   }
 
   private stepSharks(dt: number) {
-    const { sharks, width: W, height: H, time } = this;
+    const { sharks, whales, width: W, height: H, time } = this;
     const minSide = Math.min(W, H);
     const cxW = W / 2;
     const cyW = H / 2;
@@ -524,6 +578,21 @@ export class World {
         }
       }
 
+      // And a lot of room to a whale: no shark wants to be inside that hide.
+      for (const wh of whales) {
+        for (let k = 0; k < SHARK_NODES; k += 2) {
+          const ox = hx - wh.nodes[k * 2];
+          const oy = hy - wh.nodes[k * 2 + 1];
+          const d = Math.hypot(ox, oy);
+          const range = L * 0.3 + wh.length * 0.2;
+          if (d < range && d > 1e-3) {
+            const w = (1 - d / range) * 4;
+            dx += (ox / d) * w;
+            dy += (oy / d) * w;
+          }
+        }
+      }
+
       // Keep the headline mostly clear: a soft elliptical no-swim zone.
       const ex = (hx - cxW) / (W * 0.3);
       const ey = (hy - cyW) / (H * 0.16);
@@ -560,23 +629,9 @@ export class World {
       sh.speed += (targetSpeed - sh.speed) * Math.min(1, dt * 1.1);
       sh.phase += dt * (2 + sh.speed / 24);
 
-      nodes[0] += Math.cos(sh.heading) * sh.speed * dt;
-      nodes[1] += Math.sin(sh.heading) * sh.speed * dt;
-
       // Follow-the-leader spine, with a stiffness limit per joint so the
       // body bends into a C at most and never folds back on itself.
-      const seg = L / (SHARK_NODES - 1);
-      const maxBend = 0.16;
-      let prevAngle = sh.heading + Math.PI;
-      for (let k = 1; k < SHARK_NODES; k++) {
-        const px = nodes[(k - 1) * 2];
-        const py = nodes[(k - 1) * 2 + 1];
-        let angle = Math.atan2(nodes[k * 2 + 1] - py, nodes[k * 2] - px);
-        angle = prevAngle + clamp(angleDiff(prevAngle, angle), -maxBend, maxBend);
-        nodes[k * 2] = px + Math.cos(angle) * seg;
-        nodes[k * 2 + 1] = py + Math.sin(angle) * seg;
-        prevAngle = angle;
-      }
+      this.followSpine(nodes, sh.heading, sh.speed, dt, L, 0.16);
 
       // Feed.
       if (sh.hunger > 0.15) {
@@ -594,6 +649,162 @@ export class World {
         }
       }
     }
+  }
+
+  /**
+   * Whales steer like a supertanker: a wide, breathing circuit, a very slow
+   * yaw, and a soft spine. No hunting, no feeding — the fish part around them
+   * and the sharks get out of the way.
+   */
+  private stepWhales(dt: number) {
+    const { whales, width: W, height: H, time } = this;
+    const minSide = Math.min(W, H);
+    const cxW = W / 2;
+    const cyW = H / 2;
+
+    for (const wh of whales) {
+      const L = wh.length;
+      const cfg = WHALE_CONFIG[wh.kind];
+      const nodes = wh.nodes;
+      const hx = nodes[0];
+      const hy = nodes[1];
+
+      let dx = Math.cos(wh.heading);
+      let dy = Math.sin(wh.heading);
+
+      // Barely any wander: a whale has a plan, and it is a slow one.
+      wh.wander = clamp(wh.wander + (Math.random() - 0.5) * dt * 0.5, -0.45, 0.45);
+      dx += Math.cos(wh.heading + wh.wander) * 0.5;
+      dy += Math.sin(wh.heading + wh.wander) * 0.5;
+
+      // Patrol: a long oval whose radius breathes, so it is never a plain circle.
+      const rx = (hx - cxW) / (W / minSide);
+      const ry = hy - cyW;
+      const r = Math.hypot(rx, ry) || 1;
+      const radius = wh.orbitRadius * (1 + 0.2 * Math.sin(time * 0.03 + wh.id));
+      const radial = clamp((radius - r) / radius, -1, 1);
+      dx += ((-ry / r) * wh.orbitDir + (rx / r) * radial * 0.6) * 0.24;
+      dy += ((rx / r) * wh.orbitDir + (ry / r) * radial * 0.6) * 0.24;
+
+      // Keep the headline clear: the whale is wide, so it starts pushing from
+      // further out than a shark does.
+      const ex = (hx - cxW) / (W * 0.34);
+      const ey = (hy - cyW) / (H * 0.2);
+      const e2 = ex * ex + ey * ey;
+      if (e2 < 1) {
+        const e = Math.sqrt(e2) || 1e-3;
+        const w = (1 - e) * 0.9;
+        dx += (ex / e) * w;
+        dy += (ey / e) * w;
+      }
+
+      // Give other whales room.
+      for (const other of whales) {
+        if (other === wh) continue;
+        for (let k = 0; k < SHARK_NODES; k += 4) {
+          const ox = hx - other.nodes[k * 2];
+          const oy = hy - other.nodes[k * 2 + 1];
+          const d = Math.hypot(ox, oy);
+          const range = (L + other.length) * 0.25;
+          if (d < range && d > 1e-3) {
+            const w = (1 - d / range) * 2.5;
+            dx += (ox / d) * w;
+            dy += (oy / d) * w;
+          }
+        }
+      }
+
+      // Soft walls, scaled to the animal: a whale starts its (very slow) turn
+      // long before the snout reaches the edge, and any push is proportional
+      // to how far out it has drifted, so it always comes back.
+      const m = Math.min(L * 0.4, Math.min(W, H) * 0.3);
+      if (hx < m) dx += ((m - hx) / m) * 4;
+      else if (hx > W - m) dx -= ((hx - (W - m)) / m) * 4;
+      if (hy < m) dy += ((m - hy) / m) * 4;
+      else if (hy > H - m) dy -= ((hy - (H - m)) / m) * 4;
+
+      const desired = Math.atan2(dy, dx);
+      // A giant cannot pivot: the yaw rate is capped by its own length, so the
+      // turning circle stays a good fraction of the body (as it does for sharks).
+      const maxTurn = Math.min(cfg.agility, wh.speed / (L * 0.5)) * dt;
+      const turned = clamp(angleDiff(wh.heading, desired), -maxTurn, maxTurn);
+      wh.heading += turned;
+      wh.turn += (turned / dt - wh.turn) * Math.min(1, dt * 2);
+
+      wh.speed += (cfg.cruise - wh.speed) * Math.min(1, dt * 0.5);
+      wh.phase += dt * (0.5 + wh.speed / 45);
+
+      this.followSpine(nodes, wh.heading, wh.speed, dt, L, cfg.bend);
+    }
+  }
+
+  /**
+   * Move the snout forward and drag the rest of the spine behind it, with a
+   * stiffness limit per joint so the body bends into a C at most and never
+   * folds back on itself. Shared by sharks and whales.
+   */
+  private followSpine(
+    nodes: Float32Array,
+    heading: number,
+    speed: number,
+    dt: number,
+    L: number,
+    maxBend: number,
+  ) {
+    nodes[0] += Math.cos(heading) * speed * dt;
+    nodes[1] += Math.sin(heading) * speed * dt;
+    const seg = L / (SHARK_NODES - 1);
+    let prevAngle = heading + Math.PI;
+    for (let k = 1; k < SHARK_NODES; k++) {
+      const px = nodes[(k - 1) * 2];
+      const py = nodes[(k - 1) * 2 + 1];
+      let angle = Math.atan2(nodes[k * 2 + 1] - py, nodes[k * 2] - px);
+      angle = prevAngle + clamp(angleDiff(prevAngle, angle), -maxBend, maxBend);
+      nodes[k * 2] = px + Math.cos(angle) * seg;
+      nodes[k * 2 + 1] = py + Math.sin(angle) * seg;
+      prevAngle = angle;
+    }
+  }
+
+  /**
+   * Push a fish away from one swimming body (shark or whale). Distance is
+   * measured to the nearest point along the front half of the body, so fish
+   * also give the flanks a wide berth. Returns a shared scratch pod — use it
+   * before the next call.
+   */
+  private bodyFear(f: Fish, nodes: Float32Array, heading: number, length: number, gain: number) {
+    const out = this.fearTmp;
+    out.x = 0;
+    out.y = 0;
+    out.fear = 0;
+    const fearR = length * 0.6 + 60;
+    let best = Infinity;
+    let bx = 0;
+    let by = 0;
+    for (let k = 0; k <= 12; k += 3) {
+      const nx = nodes[k * 2];
+      const ny = nodes[k * 2 + 1];
+      const d2 = (f.x - nx) ** 2 + (f.y - ny) ** 2;
+      if (d2 < best) {
+        best = d2;
+        bx = nx;
+        by = ny;
+      }
+    }
+    const d = Math.sqrt(best);
+    if (d >= fearR || d < 1e-3) return out;
+    let w = 1 - d / fearR;
+    w *= w;
+    const awayX = (f.x - bx) / d;
+    const awayY = (f.y - by) / d;
+    // Fountain effect: break to whichever side of the body's path you're on.
+    const hx = Math.cos(heading);
+    const hy = Math.sin(heading);
+    const side = hx * (f.y - nodes[1]) - hy * (f.x - nodes[0]) >= 0 ? 1 : -1;
+    out.x = (awayX * 0.7 - hy * side * 0.9) * FISH_FLEE_K * w * gain;
+    out.y = (awayY * 0.7 + hx * side * 0.9) * FISH_FLEE_K * w * gain;
+    out.fear = Math.sqrt(w) * gain;
+    return out;
   }
 
   /**
